@@ -1,0 +1,587 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Criar o projeto
+        run: |
+          mkdir -p app/src/main/java/com/my/discordxit
+          cat > settings.gradle <<'__EOF__'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+              plugins {
+                  id 'com.android.application' version '8.5.0'
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "Painel"
+          include ':app'
+          __EOF__
+          cat > app/build.gradle <<'__EOF__'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.my.discordxit'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.my.discordxit"
+                  minSdk 21
+                  targetSdk 33
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+          __EOF__
+          cat > app/src/main/AndroidManifest.xml <<'__EOF__'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+              <application
+                  android:allowBackup="false"
+                  android:label="Painel"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".PainelService"
+                      android:exported="false" />
+              </application>
+          </manifest>
+          __EOF__
+          cat > app/src/main/java/com/my/discordxit/MainActivity.java <<'__EOF__'
+          package com.my.discordxit;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.view.Gravity;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.Toast;
+
+          public class MainActivity extends Activity {
+            @Override
+            protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              LinearLayout l = new LinearLayout(this);
+              l.setOrientation(LinearLayout.VERTICAL);
+              l.setGravity(Gravity.CENTER);
+              l.setPadding(48, 48, 48, 48);
+
+              Button abrir = new Button(this);
+              abrir.setText("Abrir painel");
+              abrir.setOnClickListener(v -> {
+                if (Settings.canDrawOverlays(this)) {
+                  startService(new Intent(this, PainelService.class));
+                  moveTaskToBack(true);
+                } else {
+                  Toast.makeText(this, "Ative 'Sobrepor a outros apps' e toque de novo", Toast.LENGTH_LONG).show();
+                  startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                      Uri.parse("package:" + getPackageName())));
+                }
+              });
+
+              Button fechar = new Button(this);
+              fechar.setText("Fechar painel");
+              fechar.setOnClickListener(v -> stopService(new Intent(this, PainelService.class)));
+
+              l.addView(abrir);
+              l.addView(fechar);
+              setContentView(l);
+            }
+          }
+          __EOF__
+          cat > app/src/main/java/com/my/discordxit/PainelService.java <<'__EOF__'
+          package com.my.discordxit;
+
+          import android.app.Service;
+          import android.content.Intent;
+          import android.graphics.Bitmap;
+          import android.graphics.BitmapFactory;
+          import android.graphics.Canvas;
+          import android.graphics.Color;
+          import android.graphics.Paint;
+          import android.graphics.PixelFormat;
+          import android.graphics.RectF;
+          import android.graphics.drawable.GradientDrawable;
+          import android.os.Build;
+          import android.os.IBinder;
+          import android.util.Base64;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.widget.FrameLayout;
+          import android.widget.ImageView;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+
+          public class PainelService extends Service {
+            // Titulo do painel (troque aqui se quiser)
+            static final String TITLE = "Uriel Xiter Android 1.108.X";
+
+            interface Toggle { void on(boolean v); }
+
+            WindowManager wm;
+            View circle;
+            LinearLayout root;
+            ImageView icon;
+            WindowManager.LayoutParams pp, ip;
+            FrameLayout slider;
+            View thumb;
+            TextView val;
+            float ratio = 0f;
+            float d;
+            final int RED = Color.parseColor("#EE0000");
+            final int RED_DIM = Color.parseColor("#B80000");
+            final int BG = Color.parseColor("#121212");
+            final int BOX = Color.parseColor("#262626");
+
+            public IBinder onBind(Intent i) { return null; }
+
+            int dp(int v) { return (int) (v * d); }
+
+            public void onCreate() {
+              super.onCreate();
+              d = getResources().getDisplayMetrics().density;
+              wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+              int type = Build.VERSION.SDK_INT >= 26
+                  ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                  : WindowManager.LayoutParams.TYPE_PHONE;
+
+              // ---------- Circulo FOV (tela inteira, sem toque) ----------
+              circle = new View(this) {
+                protected void onDraw(Canvas c) {
+                  Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeWidth(dp(2));
+                  p.setColor(Color.WHITE);
+                  float r = dp(30) + dp(170) * ratio;
+                  c.drawCircle(getWidth() / 2f, getHeight() / 2f, r, p);
+                }
+              };
+              circle.setVisibility(View.GONE);
+              WindowManager.LayoutParams cp = new WindowManager.LayoutParams(
+                  -1, -1, type,
+                  WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                      | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                      | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                  PixelFormat.TRANSLUCENT);
+              wm.addView(circle, cp);
+
+              // ---------- Painel ----------
+              root = new LinearLayout(this);
+              root.setOrientation(LinearLayout.VERTICAL);
+              root.setBackground(rr(BG, dp(10)));
+
+              // Cabecalho: ▼ minimiza, ✕ fecha, arrastar o titulo move o painel
+              LinearLayout head = new LinearLayout(this);
+              head.setGravity(Gravity.CENTER_VERTICAL);
+              head.setPadding(dp(10), dp(8), dp(10), dp(8));
+              head.setBackground(topRR(RED, dp(10)));
+              TextView min = txt("▼", 14, Color.WHITE);
+              min.setPadding(dp(4), dp(2), dp(10), dp(2));
+              min.setOnClickListener(v -> minimizar());
+              TextView title = txt(TITLE, 15, Color.WHITE);
+              title.setGravity(Gravity.CENTER);
+              TextView close = txt("✕", 16, Color.WHITE);
+              close.setPadding(dp(10), dp(2), dp(4), dp(2));
+              close.setOnClickListener(v -> stopSelf());
+              head.addView(min);
+              head.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+              head.addView(close);
+              root.addView(head, new LinearLayout.LayoutParams(-1, -2));
+
+              // Abas
+              final String[] nomes = { "Aimbot", "Esp", "Misc", "Info" };
+              final LinearLayout[] tabs = new LinearLayout[4];
+              final LinearLayout[] pages = new LinearLayout[4];
+              LinearLayout tabRow = new LinearLayout(this);
+              tabRow.setPadding(dp(8), dp(8), dp(8), 0);
+              for (int i = 0; i < 4; i++) {
+                final int k = i;
+                tabs[i] = tab(i, nomes[i]);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+                lp.rightMargin = dp(6);
+                tabRow.addView(tabs[i], lp);
+                tabs[i].setOnClickListener(v -> select(tabs, pages, k));
+              }
+              root.addView(tabRow, new LinearLayout.LayoutParams(-1, -2));
+              View line = new View(this);
+              line.setBackgroundColor(RED);
+              root.addView(line, new LinearLayout.LayoutParams(-1, dp(2)));
+
+              // Pagina Aimbot (tudo visual, so o circulo do Fov desenha algo)
+              pages[0] = page();
+              pages[0].addView(row("Ativar Aimbot", false, null));
+              pages[0].addView(row("Aimbot lite", false, null));
+              pages[0].addView(row("Injetar headtrick", false, null));
+              pages[0].addView(sep());
+              pages[0].addView(row("Exibir Circulo do Fov", false,
+                  on -> circle.setVisibility(on ? View.VISIBLE : View.GONE)));
+              pages[0].addView(sliderRow());
+              pages[0].addView(dropdownRow());
+              pages[0].addView(sep());
+              TextView tipo = txt("Tipo de Aimbot", 15, Color.WHITE);
+              tipo.setPadding(0, dp(4), 0, dp(2));
+              pages[0].addView(tipo);
+              pages[0].addView(row("Ao Atirar", false, null));
+
+              // Pagina Esp (placeholder: mande o print dessa aba para ficar igual)
+              pages[1] = page();
+              pages[1].addView(row("Opção 1", false, null));
+              pages[1].addView(row("Opção 2", false, null));
+              pages[1].addView(row("Opção 3", false, null));
+
+              // Pagina Misc
+              pages[2] = page();
+              pages[2].addView(row("Ocultar Em Transmissão", false, null));
+              pages[2].addView(row("Esconder Icone", false, null));
+              pages[2].addView(sep());
+              pages[2].addView(row("Holograma azul", false, null));
+              pages[2].addView(row("holograma Verde", false, null));
+              pages[2].addView(row("Holograma Roxo", false, null));
+              pages[2].addView(row("Holograma amarelo", false, null));
+              pages[2].addView(sep());
+
+              // Pagina Info
+              pages[3] = page();
+              TextView info = txt(TITLE, 15, Color.WHITE);
+              info.setPadding(0, dp(8), 0, dp(4));
+              pages[3].addView(info);
+
+              LinearLayout box = new LinearLayout(this);
+              box.setOrientation(LinearLayout.VERTICAL);
+              for (LinearLayout pg : pages) box.addView(pg);
+              ScrollView sv = new ScrollView(this);
+              sv.setVerticalScrollBarEnabled(false);
+              sv.setPadding(dp(10), dp(6), dp(10), dp(6));
+              sv.addView(box);
+              root.addView(sv, new LinearLayout.LayoutParams(-1, dp(230)));
+              select(tabs, pages, 0);
+
+              pp = new WindowManager.LayoutParams(
+                  dp(310), -2, type,
+                  WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                      | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                  PixelFormat.TRANSLUCENT);
+              pp.gravity = Gravity.TOP | Gravity.START;
+              pp.x = dp(30);
+              pp.y = dp(40);
+              title.setOnTouchListener(drag(root, pp, false));
+              wm.addView(root, pp);
+
+              // ---------- Icone flutuante (painel minimizado) ----------
+              icon = new ImageView(this);
+              byte[] bytes = Base64.decode(Logo.B64, Base64.DEFAULT);
+              Bitmap bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+              icon.setImageBitmap(bmp);
+              icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+              icon.setVisibility(View.GONE);
+              ip = new WindowManager.LayoutParams(
+                  dp(52), dp(52), type,
+                  WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                      | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                  PixelFormat.TRANSLUCENT);
+              ip.gravity = Gravity.TOP | Gravity.START;
+              ip.x = pp.x;
+              ip.y = pp.y;
+              icon.setOnTouchListener(drag(icon, ip, true));
+              wm.addView(icon, ip);
+            }
+
+            // ---------- Arrastar (painel e icone) ----------
+            View.OnTouchListener drag(final View target, final WindowManager.LayoutParams lp,
+                                      final boolean isIcon) {
+              return new View.OnTouchListener() {
+                int sx, sy;
+                float tx, ty;
+                boolean moved;
+                public boolean onTouch(View v, MotionEvent e) {
+                  switch (e.getAction()) {
+                    case MotionEvent.ACTION_DOWN:
+                      sx = lp.x; sy = lp.y; tx = e.getRawX(); ty = e.getRawY(); moved = false;
+                      break;
+                    case MotionEvent.ACTION_MOVE: {
+                      float dx = e.getRawX() - tx, dy = e.getRawY() - ty;
+                      if (Math.abs(dx) > dp(6) || Math.abs(dy) > dp(6)) moved = true;
+                      if (moved) {
+                        lp.x = sx + (int) dx;
+                        lp.y = sy + (int) dy;
+                        wm.updateViewLayout(target, lp);
+                      }
+                      break;
+                    }
+                    case MotionEvent.ACTION_UP:
+                      // icone: toque curto abre o painel; segurar ~1s fecha tudo
+                      if (isIcon && !moved) {
+                        if (e.getEventTime() - e.getDownTime() >= 1000) stopSelf();
+                        else maximizar();
+                      }
+                      break;
+                  }
+                  return true;
+                }
+              };
+            }
+
+            void minimizar() {
+              ip.x = pp.x;
+              ip.y = pp.y;
+              wm.updateViewLayout(icon, ip);
+              root.setVisibility(View.GONE);
+              icon.setVisibility(View.VISIBLE);
+            }
+
+            void maximizar() {
+              pp.x = ip.x;
+              pp.y = ip.y;
+              wm.updateViewLayout(root, pp);
+              icon.setVisibility(View.GONE);
+              root.setVisibility(View.VISIBLE);
+            }
+
+            // ---------- Slider "Regular FOV" ----------
+            void setRatio(float x) {
+              ratio = Math.max(0f, Math.min(1f, x));
+              val.setText(String.valueOf(Math.round(ratio * 100)));
+              FrameLayout.LayoutParams tp = (FrameLayout.LayoutParams) thumb.getLayoutParams();
+              tp.leftMargin = (int) ((slider.getWidth() - tp.width) * ratio);
+              thumb.setLayoutParams(tp);
+              circle.invalidate();
+            }
+
+            LinearLayout sliderRow() {
+              LinearLayout r = new LinearLayout(this);
+              r.setGravity(Gravity.CENTER_VERTICAL);
+              r.setPadding(0, dp(4), 0, dp(4));
+              slider = new FrameLayout(this);
+              slider.setBackground(rr(BOX, dp(6)));
+              thumb = new View(this);
+              thumb.setBackgroundColor(RED);
+              slider.addView(thumb, new FrameLayout.LayoutParams(dp(10), -1));
+              val = txt("0", 15, Color.WHITE);
+              val.setGravity(Gravity.CENTER);
+              slider.addView(val, new FrameLayout.LayoutParams(-1, -1));
+              slider.setOnTouchListener((v, e) -> {
+                v.getParent().requestDisallowInterceptTouchEvent(true);
+                setRatio(e.getX() / v.getWidth());
+                return true;
+              });
+              slider.post(() -> setRatio(0f));
+              r.addView(slider, new LinearLayout.LayoutParams(0, dp(32), 1));
+              TextView l = txt("Regular FOV", 15, Color.WHITE);
+              l.setPadding(dp(10), 0, 0, 0);
+              r.addView(l);
+              return r;
+            }
+
+            // "Target" (so visual: toque troca o texto)
+            LinearLayout dropdownRow() {
+              final String[] alvos = { "Cabeça", "Peito", "Corpo" };
+              final int[] idx = { 0 };
+              LinearLayout r = new LinearLayout(this);
+              r.setGravity(Gravity.CENTER_VERTICAL);
+              r.setPadding(0, dp(4), 0, dp(4));
+              LinearLayout bx = new LinearLayout(this);
+              bx.setGravity(Gravity.CENTER_VERTICAL);
+              bx.setBackground(rr(BOX, dp(6)));
+              final TextView tv = txt(alvos[0], 15, Color.WHITE);
+              tv.setPadding(dp(10), 0, 0, 0);
+              bx.addView(tv, new LinearLayout.LayoutParams(0, -2, 1));
+              TextView arrow = txt("▼", 12, Color.WHITE);
+              arrow.setGravity(Gravity.CENTER);
+              arrow.setBackgroundColor(RED);
+              bx.addView(arrow, new LinearLayout.LayoutParams(dp(32), dp(32)));
+              bx.setOnClickListener(v -> {
+                idx[0] = (idx[0] + 1) % alvos.length;
+                tv.setText(alvos[idx[0]]);
+              });
+              r.addView(bx, new LinearLayout.LayoutParams(0, dp(32), 1));
+              TextView l = txt("Target", 15, Color.WHITE);
+              l.setPadding(dp(10), 0, 0, 0);
+              r.addView(l);
+              return r;
+            }
+
+            // ---------- Helpers de interface ----------
+            GradientDrawable rr(int color, int radius) {
+              GradientDrawable g = new GradientDrawable();
+              g.setColor(color);
+              g.setCornerRadius(radius);
+              return g;
+            }
+
+            GradientDrawable topRR(int color, int radius) {
+              GradientDrawable g = new GradientDrawable();
+              g.setColor(color);
+              float r = radius;
+              g.setCornerRadii(new float[] { r, r, r, r, 0, 0, 0, 0 });
+              return g;
+            }
+
+            TextView txt(String s, int sp, int color) {
+              TextView t = new TextView(this);
+              t.setText(s);
+              t.setTextSize(sp);
+              t.setTextColor(color);
+              return t;
+            }
+
+            LinearLayout page() {
+              LinearLayout l = new LinearLayout(this);
+              l.setOrientation(LinearLayout.VERTICAL);
+              return l;
+            }
+
+            View sep() {
+              View v = new View(this);
+              v.setBackgroundColor(RED);
+              LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(1));
+              lp.topMargin = dp(6);
+              lp.bottomMargin = dp(6);
+              v.setLayoutParams(lp);
+              return v;
+            }
+
+            LinearLayout tab(int type, String s) {
+              LinearLayout l = new LinearLayout(this);
+              l.setGravity(Gravity.CENTER_VERTICAL);
+              l.setPadding(dp(7), dp(5), dp(7), dp(5));
+              l.setBackground(topRR(RED, dp(8)));
+              l.addView(new Icon(type), new LinearLayout.LayoutParams(dp(16), dp(16)));
+              TextView t = txt(s, 14, Color.WHITE);
+              t.setPadding(dp(4), 0, 0, 0);
+              l.addView(t);
+              return l;
+            }
+
+            void select(LinearLayout[] tabs, LinearLayout[] pages, int k) {
+              for (int j = 0; j < tabs.length; j++) {
+                tabs[j].setBackground(topRR(j == k ? RED : RED_DIM, dp(8)));
+                pages[j].setVisibility(j == k ? View.VISIBLE : View.GONE);
+              }
+            }
+
+            // Checkbox quadrada (so visual; "t" so e usado no circulo do Fov)
+            LinearLayout row(String s, boolean on, Toggle t) {
+              LinearLayout r = new LinearLayout(this);
+              r.setGravity(Gravity.CENTER_VERTICAL);
+              r.setPadding(0, dp(5), 0, dp(5));
+              final View b = new View(this);
+              final boolean[] st = { on };
+              b.setBackground(rr(on ? RED : BOX, dp(5)));
+              r.addView(b, new LinearLayout.LayoutParams(dp(24), dp(24)));
+              TextView tv = txt(s, 15, Color.WHITE);
+              tv.setPadding(dp(12), 0, 0, 0);
+              r.addView(tv);
+              r.setOnClickListener(v -> {
+                st[0] = !st[0];
+                b.setBackground(rr(st[0] ? RED : BOX, dp(5)));
+                if (t != null) t.on(st[0]);
+              });
+              return r;
+            }
+
+            // Icones das abas desenhados em codigo
+            class Icon extends View {
+              final int type;
+              Icon(int t) { super(PainelService.this); type = t; }
+              protected void onDraw(Canvas c) {
+                Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+                p.setColor(Color.WHITE);
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(dp(2));
+                p.setStrokeCap(Paint.Cap.ROUND);
+                float w = getWidth(), h = getHeight(), cx = w / 2, cy = h / 2;
+                float r = Math.min(w, h) / 2f - dp(1);
+                if (type == 0) { // mira
+                  c.drawCircle(cx, cy, r * 0.45f, p);
+                  c.drawLine(cx, cy - r, cx, cy - r * 0.6f, p);
+                  c.drawLine(cx, cy + r, cx, cy + r * 0.6f, p);
+                  c.drawLine(cx - r, cy, cx - r * 0.6f, cy, p);
+                  c.drawLine(cx + r, cy, cx + r * 0.6f, cy, p);
+                } else if (type == 1) { // olho
+                  c.drawOval(new RectF(cx - r, cy - r * 0.55f, cx + r, cy + r * 0.55f), p);
+                  p.setStyle(Paint.Style.FILL);
+                  c.drawCircle(cx, cy, r * 0.28f, p);
+                } else if (type == 2) { // engrenagem
+                  c.drawCircle(cx, cy, r * 0.5f, p);
+                  for (int k = 0; k < 8; k++) {
+                    double a = k * Math.PI / 4;
+                    float ca = (float) Math.cos(a), sa = (float) Math.sin(a);
+                    c.drawLine(cx + ca * r * 0.7f, cy + sa * r * 0.7f,
+                               cx + ca * r, cy + sa * r, p);
+                  }
+                } else { // cartao
+                  c.drawRoundRect(new RectF(cx - r, cy - r * 0.7f, cx + r, cy + r * 0.7f),
+                      dp(2), dp(2), p);
+                  c.drawCircle(cx - r * 0.4f, cy - r * 0.1f, r * 0.2f, p);
+                  c.drawLine(cx + r * 0.05f, cy - r * 0.2f, cx + r * 0.7f, cy - r * 0.2f, p);
+                  c.drawLine(cx + r * 0.05f, cy + r * 0.2f, cx + r * 0.7f, cy + r * 0.2f, p);
+                }
+              }
+            }
+
+            public void onDestroy() {
+              super.onDestroy();
+              try { wm.removeView(root); } catch (Exception e) {}
+              try { wm.removeView(icon); } catch (Exception e) {}
+              try { wm.removeView(circle); } catch (Exception e) {}
+            }
+          }
+          __EOF__
+          cat > app/src/main/java/com/my/discordxit/Logo.java <<'__EOF__'
+          package com.my.discordxit;
+
+          // Logo H4X em base64 (PNG 128px). Nao precisa mexer.
+          class Logo {
+            static final String B64 = "iVBORw0KGgoAAAANSUhEUgAAAIAAAAB3CAMAAAD8d7hYAAABgFBMVEUBYJ7jHijgnJ7eX2Vk8vwNR2oBK08Bmtcv4vkTIiuoHyYuBgbY5+loBwdsZmXg29ybYmSc7/afkZBgXFxWLi+mm5wlICCrnp/Z0NH/AAAAe8XlvsAtICHeO0NoYGB3hokHiK/Yt7fGtbZeWlqvOkPce4Hz4t+ReXmqAACKdXVTISF/AH9oP0BDQT93gH6ufoKAgH6ViYm8wL//tsjQwL8AAAADAQH7+/vq5+fwAQvY19euAQ0vAAJOAANuAAWQAQnRAgoAx/rKyMgUFhYBAAAC1/q3t7epqKgoJyeXl5dl7fpIR0c1NjaIh4dXV1dnZ2cJAAB2dnYBAAABuPTv2dlR6/oHAAACAAAEAAABqOsBGS0BOWoP5fvzyMoAic3utrgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA4uofnAAAAYHRSTlP9/P39/P39/f34/BH7Bxac+/0j9vzzm1xtAf39Xf2o/f0lVU/9/REhA2piAv39/f39q/0O/QD8/f38/fz8/Pz8/P39/ND9/f39/fz9/P39/S79sf39/E+QcP39/f39/f0qpvm7AAAV/klEQVR42rVbB2PaSNMWwhiDSxyX5HK+XHL9fb/esloLIbCEVSIkAZYBF8z//xffM7OSKCaO47vbFBsEmmefKTszu9I+vXjsD8bTyWjUy8doMh0Pdr/5LtoLpY8no57gYamhXojeZDrY/5sB7A8mLNtq251Oa2l0OnabgYzGu38bgHcsnWSzSNu222rYBZqObTGG/b8FwJSks/B8smsjR0YYetO/HMBgkkvvtElYo5bGvueYPBzdD4dJ36UL7U7Ow/SvBUDiC+n91DeNDUM6YRrkGAChN/7rAIyVeJpYP94ovBxO3Ceq+MOjwV8EYKLuKIQ7JOnSeHo4KZSBL7S/qodnAuiJNotvhNKQ8mviWRmHLlHWAQl/AYAeZoNbuTFubD5HPEMYCoLdFr3BnwQwIPmYfiK/QTwNMxGiQ98c/ykAA2izawvXh/g949uG7xJ3TyHQnmP+HfAYScP8punnJETCehKB9kz5Q0zfNL59SGP4NALtOfItEWL6L5EPCowQ3gAEgxcBGAM+5Hsvlk8IfMXB4AUAlHzX+RPyEZ1zBL3dbwYwYP5d03BeLp9tJ0RAsMXkmwH0WP+OdLIX2P9CB0AwhDdaYlOO8BSAEX8L8v+EAgoEkSBD7E0eYdCeMoA2/M83PNP8MwRAB44jpWupHKE3HTwXgBDQ29DglOOFAKQ/jPo0AqQqlMswhtH4WQBGMABRMxzH5AVwAeFZaOjzftJPYs+U9H3T8Y8DXpwooVnKErQve0AbDoCV3Qvjw9h3liB4zhccftnypZ8OvTWozjDgrAYQJl8D8A4eYIs4BINRkiT9IPJlmYaE/pqS6f948aaPaTvOI06ISr+2liVoTxFAqV+mvu1FtBwWYxgu39ojAHGyyAMWM5flKIiRrxlCW4zePQlgRAQEaegsAloqooLljPgor1CK6LnFNZn4S5N2dM+n1DmHYJqzqh434N/tPFf7AoApgidSgKGztrSeFpMOHLlAhl8pWVIjCaXM1HzhA5ynC7efhCZDkMa81fq1wRHmCQBKfiKXeWTlilTmNPf38t/MEJ8bBgWe4VBKBmdSbrw0gqGTK6JJ8RVxafpFAEp+XPLoxWmSpCFINoO+8kLTTel24FgmiWGKMAcQHquoIcOAxd7eNm5vcwhuXCLokIn19jcD2J+w/DCfoJ8ExQ2G+H7UZ8/G+kK3o6LITY3UzYO1E6m4TdmgcLdrGo/aXUPdIVKK22vCBPB3vBnAKA/BLD4upAuaSB/3jlM2KRlh1mDHjMVQQjMKQOKxfCcg8drSuFM0BMpB5qDA7rArahtT4DZSEFZjIb5xh8nUtkUDWWmYUlSSngvJpoSmh57wFQNxzIkbLgmIr19c3t/f7+zUP2r8ZWZRuU+1ZVkwhN3HAFQK5jrs+4UVlXOpNfr4fhyEpGhcjXwfl9OhOON83YzYABzIv9PqkL11fX29tbW1c1kvEQhGIJs2+fn0EQAlv2HmdYXinjRZp4GfIiVLE0HsR6V99xPO2aSRMAEStN09XN5ff8bYer31+frz1v3FGgKdzJB0oD1OgQS7lBMtpl+/wGQwkZ0r7Y6MQ2FzCwBuAGXAXryADSDN5W8RgNcwudefP1/fXz6UCNgSm5bgUKA9SoGUfK+4/Z2mXdxv8Xj9emtHu+2TLEwywScC6N4nOwlM6CCNKAJ4hLmQDwSwGkJweVmv1cgSg8Aldemsg/EqgDGvgCZHnFL+w+VWPvaMPSAg/5QxE6DCPxmDIPLdkHwhErdEWS6ftbC3xQg+3t3RLeMogQNn7AeTFQD/6FEKQvbvicDN+a9j+rgDxudr8LlV3wZD0qOLSFawOoQOI/BkKCh1wJW776+u7reuSwTX/OvO5YV2R0oInITC1q/KCLQVAuwW7gr9i6S/kP96j+TznbaM1xdEAQNIDfDgG67rmKQNeSyUBdxqN1cXF+wBCxBEwcVNTVHgxEBaRSyyeu+0lQjUsl0Ko0hklP1rHyEf077meWC83rskK0AUwkqRCgYAAyCN9QPYIGI1LPAKAC53rgvV5QguL0ABhcTI9JyMjQDRWFvOQRAbSK1xZCoF1DToHzZ0vTQuH+7EEPL7yhU8ABCRwb/TMgEo2s0Fj/udj7VGY/vjzlYJ4KamdIAVxKgCQFvsrgEQ/wECUlOFgIZ2swO9L8nf2SF3YnRmqFyKAMAEA5GQKwBJQ7tSAB4aohGHQ1doCgIAkBvDfD0Yqzzv0HKwu6YC65iywJyAO+3y+jqXv5OPy0vcI0lE6Ckv8SR91jU9EUXQB3Sz/aDka5gBOcnrhqjtsA1cEoBbDkWmMe8+UsGnCTgJKOs9zS2gfg8zUuKvbjAu7u8BYNv1YQB5nIhS/pEYiYihFkThu7qaP2DVPph75oeaQrBDAB5yANL4tYPV4LEXdGgWRpq7wNV9Pu8LrX5zpTVuLi4vrzQxTIQZrbVIPZOwEC81+tTFFZS9DWEuEgJcrm8RARdX9ZoCgFBsk7TpCoB9xAGrn0cW0gBWMxKPQC5qF3Xc8QrxbNv1RBiu92j70H7ouikDuL+nT982FpdrMB4GoN2y5SInEWQCg0eRsEPrisv83j1gKlhP+W5Co9vVoAExTAPncZc4lK5Sxx0A7FySBSxdbeBW5AUPDMABAVaeEGhrxQBFIidgCmoEgBBc1Mr73DMBXvIYgCt9EQa0ENYvdhiA0pIb0mxuL4iBKwXAlbQaU9o/WF+MpjBDVGNqKrX6FSGA2rcLKRpufJok3oY+OYD3k2HqkhdcXhOA1FUAAgagNPA9AejTYizyxFxbSwdsu2GYaawYQERhAAUDLozhxHHN/iYAInPcMKVIjCh4DydI8oSCmNhmw4QJkBGmxiFb4IakFPVQBwTFvrIBiumXbPhqfLzZFmb/sQWK3BXTNAbhsEK4LSzAG6rFj6kjAqCBOw7fYJ8t8BGAXbLCPdRagVqJKKhe0iKiTPnqToR+X7qbASDRQIoWKgpIB1ilwtAjdTauCg2QNs1Zh+SMNhQm+z1cwIpC6z0BqNOycnF5dUM+UIMCIqNvDleNb/FrZPhDD/rRrmC6FAkRGhIOlDALRQBpIOBlwM47h48ZcCnjIQpuaw9QgkJwhUiISTVQlpqr/p8uRyMj9hyHKbjH6l9ga+TycwKOsy6nY7sbAAxgGw0q92TIFDACtbZQBBCmkxqrMTD1VqKRiWp2yI4Azuva9q17u43VkeWDAI4CMAHUx0V9vu4FnXafi1gJV7+9+/6hniO4JEp9IzbWXNA3ly3CNzwstH2yQ4aAWbMhQz5+1ZgA15i1yASmmwAgDtB6SF15ycXF9w85BNhhI6ZOQLBacZpIhJZeEnmoFG+13IN5XPD863l5lFAUsO2icaqtbcx0xAdVx/NUFYL6zQ2wH/uGYy6y1SL6rL6j6gNPISjHlZLPCxE+onMqsqlDskuh+LjoRDGCO4IA7w0wecp5k2WzF1RByWglFhgOV6632sPVBf7wgPiHojCJkBCrXOgxgHGPO6ppSC2pvMS7vbtDKsvtB0pjoIHQXSFglQJ2Ia6dbu80Vh7lEfWH7zWVEVMGwwCsDQAmamcAnhUWTR616ASx6gRQI8yNZLBkAdTykMmKDlQbL+SSBkZch3SI17ZVeYySQJ9tZGBA0+8I94Oqs00vHCZRX7j/Tm0aMko4mCr/4iWjN7gZsGSYsXqLs9PbRVGbT5+CozHbaANTwVX5Mc3VC9MEIx3GanvUdMLMTEMlzJFmEXuohcF7mFxHBlGKsJ+q9jhyLlIgosA2VLh9W0LGheq8QwBWvWBCrTOLGnGoMT1nuS3qD/0kk0OqvUzVjJT+CQn0WTQX2/QdqsxlkDCAPbIEM3i8ZJOB6FmT3HAlDkx4R6Gx3hOX4dBP+6eo+j3HPzWcTB6WW8Sh6kj0ldFBRybXpwqAmTEN64ljkndb31M+2ttfAJiw+vtyrbPpREnYR0LhZY5ziBvqhp+sbtqa/chQSFQ/W8ZD7s6rYRir61Yk821XtRiN9gsASn5tTfqw76ZDqsJ94/+Mqi5nZ7oRJcZK69xBnZeWmwK4fegtAaBCKYgSt5y/aTo+FbDVChhvq9VAU005zH+1rRu7wTB00sAd6lLfO9OzmQ7wWHGluQTBcdO+s9iWgKpM9YGSBCjF9xWGKIoS1cXN9EM2edWkGrD8YKkfn0kflRbK7rif6SBsLnWjUjUcOHe/ZDtXgbKrvBFsUs1nrgyQEA1hkH48HMZlDzmrnhQItP2e2pgqAcCUhhSNdD0Rh+BiVslM2dRhAFQvZGoroBhpYJb7OdyKVvL3lkkw/DReb53PYQY2dwq1MYdf31jI56on3UN9pht7pj6rvjfk4czwTynmRtWiQ8s/vTgzy50EmjD/3dN1YJC82USkGLRps7qf6pMhwhV2tQn9jMrdBqiR5H+Qh9QrcvSMTAbTh4vrVAhbYkafgnHwOYqV3XSl/ZkkAFLPTE+9oztrJx5oofGOf7PIEMdaz+K2jFnKRz2NMudENLJsT2a4U7dboRZtzTilUxyghfbEOQE6e7w95sh5ZjjzbGZT38BhCOBD6UcN1UsUp02ujTSYoOXieqam4Ph9mn9TWLp09Kr+m8y6FcM4PBEn1JdBAKnmTTqKtN46AMcx5joHbD31wr5IIdrZc+J4xTipSSZOKtQk6jGA/pLvJFQ4NIWogpRK08gqZ9WuPrfIIBxiwLIoDosfX706bajl0AvjfNGgvroxq2ZVjjcyo5QiCGczwzzs+7mVqp49cs5Glbu1pAKrUQKgpTWiJmKn+m+ZUe3sZa3Kb9AB5SlDdXCM7ED8+N2rV6/2ApB87JYrI+7yXyhrWuBA17Mz/DOojxQ0YbjHok8dUql2lvQsEv0q58baiGqUOQKqzCj4ctoO+ZUTTLnaMbNWq9VtdTqWk2L63QpGF0vZ8Ssap4tmKUcICf5CAyqTxgyZkTybQR2UwDT1+WmEvCIOeBNCZjH5k2JgQmG5aXj92PepnHSpf2a3ECn8eeuY+totiIWakK5Y7fNKpVo979qkAoxDOrJEm5FvfxSkDScAkEpXhxfMDYQvqVeqmXHYFhZ+eFgdUz/Euul8oMzhV9600Lg5aFWNvOBz93SqnDuon32pO44uu5Vq5bzbVgfFzjGYgr5ioN0CJLst3rzlBipu4la7GK1K6708g7orrVZVnzfbon2oy7RoLZMLzdWWgbbL2yPtquT4E0nIR2i2Ok1xDP5O2pVu5fy821HwOgTgnM7FsA7cdvecCGmDgl6k9inE4XvYTBdyjcyYZaTCVqVbhVqt5txbSmffW9yw17AWUUxsN3VJS0lVyRc2OaKRQWaXRLaXAHQxY/EWVvjfwgYAoAOAX94IrufeIFGtAFUV/M+NbJ7pREe1AntCzlWt5pV+zayqFgUWo121RQKRVV0H8xYsDqqtYH0mz7cJgDo+h0uKAEu8+Q7jR1ys5IB++EVAfO+XI3Gi63izksH7kADPJciAOev6rAJTaOoeUs2hNzu0mXluVtM5IZo0dIypUGpGx+FaiDyUWbLaO+rsoNUqNPBPAtAAI5AFIgHgpzeY/sHRgQhmhk4fq84gFkYMG5plVcDRK/ig/V6fz/UqZpyfbNHyhLiTHxJsM5QeMXAyp+C7AQBp4OfvvnuL10wALr75/eDol19+Pzo4In/MqvjY+zlEGvNu92w+zxAJfmtW6N6WbfMePgsaFznhKD+FSP9wcTwQbV34M+N/FIDuOoDeWyD4UbSJAGUfbyAbfw+OelQaZHj//MyQlTlsWOoyy6QOr8f97fxOvIG91CMaj9RxTFIncE3hNQIpkJ4DKL7WPVcG0fj57VvSQE4AnTQDB38Awu8/CHHS7BBSzBrzR1DoIjAav7Gl2Xz0NT8Wubpzmh+VVYcLeqLZPpkFjagAoC61CwBvfnr7MzTQVQTANGE3+0cHfxwcHBxNSqhYDuCAWM4JgM4HYtRRXHWW43GHZDCeTtUJDyJgppeetxEAfEARYJ9XqudIcn864PFpd0pFFj44l7NKN0NYpBSoyadYylGeutU2Hx6wrUNjHjwJoCHIBFtWm0Mldf1+ZwC71OlRDvu+Ag3MyQD07FcKO6JHp7En0/FXzpDAMa3qIRedNEvcHatgu22TxPNzCgNHR/+EozABHVIEoZp82t3fPzjYVweAGGtXr8xhknBDrOUEYPC8c0QAUGmKZoPkM4BWl+93fp5b5A9HR2/YBNmu8jenn3YP/rWoNFkH5935DDnV3NtDSCAAveceZALblmiS/CovPwxjBcAfPQtv0u8sioLT8unVXAeUTJ3J2enQ0DkBezaAMchv+tD5kuAVAD/9UBCgANBqOVg9hNXNAWDMTv7TmHMOOnnuUa7BSDQPKVq2NgP4XyaAzEFFJwDo7a9tgfKHzzgfdpC76VZ7EwLtywf5yPRVBtCl8AHv5VkR27s/sHVyEGQARaW36HgWOmg2qbMz9LJZdSMC7csn6axyAaZD9HSMvgSwP7GaOQElgMm7FTO2eB3vwvJSKgSottZZC9PnHmZDYBwVAPJ0wC4Ww92SgFGvBLDabrOVCvDViDJ11DdVQ29bxeGZ5xxmGwxoN509fxkAedOEgxAR8C+jUgXvlvtdbaRBDLcDALM5ZaLIUKvUGhk//0AjbeGUa1FvmQ4KQh31hEEOwFryMToJisxR6YC2wZAk7+G/rGnxjvnzz5QuAIw+/WOyBIDf5iS92ayoULE4NErHIPBaeVDHdqmjg1x4lndGvgmAmh4ATLiPWwCgrKLVXXfPHAEKfpvkd1QC17FqgXBTB2VHkyuB6fMB7Pesbgng3YTnTQYBD7HVYyUUpBWQLtvBbh6HKy0by2Qr9wNKgqXMCRCD5wPYVetfiwM9bS3nOfF0RPlj8XSLUoeCNlEeCAOgIK0Y6/DuNvWmKNNcP+3/lWO9SwDeKXtnAAP1gJEC0OXZc6AQgg8iQgE2K0p9u00AkCC2KQysL4ja049V5I7HDPRKABNeLPLnavK8nQZchb6D8tG2VYbLOuhQwZ3R6S378QMX2pMEqCyU/G1K4b3IR8DiYFo8acUMsGXixQAG0FQKENM8GhIFiUHzt8Xjxy2ePlfcqRTLz3SXVZvDKVM4oCgBUDrLBnjOBEzKJRGv+rq9Wf6TkRDhplLY9wRO+P68qMymy1qqlACmY0KJtYvUrvbCz3MKOvZm+U8BmIpO+SiX4Ga+crrW0tK726NVid8j61LyWeKIAyJnlBS9vzD/rzBgFQ+SqaLJKnzPKk15DC1ROU6ly4B1hpe5oeIlbIiv4jVlpN96uH1SPMqXLwVtKh4pPbXKcEqnPgpQ008ocFkerZggKU9pmRLrC/K/drp+MaaT5cb3aHH4U4m36Gke0W5b6sm7NtV9nFGVanvJAw6DhcTeKpzxIn1dDCpyczgWLV8j0Vb5vGJo/IInLAbjAUapkvwBz+VoMl3GWJCknr/kx9PKiG29RAXPegiteOaUnqda5oNXj01q+4sBrD2RSByxuMm6Eb3oIZcXAyn0Ro/ljlhrX3r08P8BQFDIMD8PObIAAAAASUVORK5CYII=";
+          }
+          __EOF__
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: painel-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
